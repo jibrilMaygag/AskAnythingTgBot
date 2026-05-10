@@ -1,148 +1,362 @@
+"""
+messages.py – Handles all incoming user messages (text + photos).
+
+State machine:
+  SETTING_NAME           → save display name
+  SETTING_GENDER         → (handled via buttons)
+  WRITING_QUESTION       → collect question text, optionally await image
+  WRITING_QUESTION_IMAGE → collect optional question photo
+  WRITING_REPLY          → collect reply text, optionally await image
+  WRITING_REPLY_IMAGE    → collect optional reply photo
+  SEARCHING              → run search query
+  IDLE / anything else   → show main menu hint
+"""
+
+import logging
+
 from telegram import Update
 from telegram.ext import ContextTypes
-from states import user_state, user_data, SETTING_PROFILE, SETTING_GENDER, WRITING_QUESTION, CONFIRMING_QUESTION, WRITING_REPLY
-from utils import build_confirm_keyboard, build_profile_setup_keyboard, build_main_menu, send_reply
-from database import (
-    get_user, update_user, create_question, create_reply,
-    get_question, set_user_profile
+
+import database as db
+import notifications
+from config import CHANNEL_USERNAME, REPLIES_PER_PAGE
+from states import (
+    user_state, user_data,
+    IDLE, SETTING_NAME,
+    WRITING_QUESTION, WRITING_QUESTION_IMAGE,
+    WRITING_REPLY, WRITING_REPLY_IMAGE,
+    SEARCHING,
 )
-from config import CHANNEL_USERNAME
+from utils import (
+    kb_main_menu, kb_confirm_question, kb_confirm_reply,
+    kb_show_more, kb_search_nav,
+    send_question_message, send_reply_message, send_replies_batch,
+    format_question_text, format_reply_text,
+    oid,
+)
+
+logger = logging.getLogger(__name__)
 
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all user text messages."""
+# ═════════════════════════════════════════════════════════════════════════════
+# MAIN DISPATCH
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    text = update.message.text
     chat_id = update.effective_chat.id
-    
-    # ============= PROFILE SETUP =============
-    if user_state.get(user_id) == SETTING_PROFILE:
-        user_data[user_id] = {"display_name": text}
-        user_state[user_id] = SETTING_GENDER
-        
-        await update.message.reply_text(
-            f"Nice to meet you, <b>{text}</b>! 👋\n\n"
-            "Now choose your gender (optional):",
-            reply_markup=build_profile_setup_keyboard(),
-            parse_mode="HTML"
-        )
+    msg = update.message
+
+    # Resolve text vs photo
+    text = msg.text or msg.caption or ""
+    photo = msg.photo[-1] if msg.photo else None
+
+    user = await db.get_or_create_user(user_id)
+
+    if user.get("is_banned"):
+        await msg.reply_text("🚫 You are banned.")
         return
-    
-    # ============= QUESTION WRITING =============
-    if user_state.get(user_id) == WRITING_QUESTION:
-        user_data[user_id]["question"] = text
-        user_state[user_id] = CONFIRMING_QUESTION
-        
-        await update.message.reply_text(
-            f"📌 <b>Your Question:</b>\n\n{text}\n\n"
-            "Confirm or cancel?",
-            reply_markup=build_confirm_keyboard(),
-            parse_mode="HTML"
-        )
+
+    if _is_muted(user):
+        await msg.reply_text("🔇 You are muted.")
         return
-    
-    # ============= REPLY WRITING =============
-    if user_state.get(user_id) == WRITING_REPLY:
-        await _save_reply(update, context, text)
+
+    state = user_state.get(user_id, IDLE)
+
+    # ── Profile name ───────────────────────────────────────────────────────
+    if state == SETTING_NAME:
+        await _handle_set_name(update, context, user_id, text)
         return
-    
-    # ============= IDLE - NO CONTEXT =============
-    await update.message.reply_text(
-        "💬 Use /start to begin or click a button",
-        reply_markup=build_main_menu()
+
+    # ── Question flow ──────────────────────────────────────────────────────
+    if state == WRITING_QUESTION:
+        await _handle_question_text(update, context, user_id, text, photo)
+        return
+
+    if state == WRITING_QUESTION_IMAGE:
+        if photo:
+            user_data[user_id]["image_file_id"] = photo.file_id
+        await _send_question_preview(update, context, user_id)
+        return
+
+    # ── Reply flow ─────────────────────────────────────────────────────────
+    if state == WRITING_REPLY:
+        await _handle_reply_text(update, context, user_id, text, photo)
+        return
+
+    if state == WRITING_REPLY_IMAGE:
+        if photo:
+            user_data[user_id]["image_file_id"] = photo.file_id
+        await _send_reply_preview(update, context, user_id)
+        return
+
+    # ── Search ─────────────────────────────────────────────────────────────
+    if state == SEARCHING:
+        await _handle_search(update, context, user_id, chat_id, text)
+        return
+
+    # ── Fallback ───────────────────────────────────────────────────────────
+    await msg.reply_text(
+        "Use /start or tap a button to navigate.",
+        reply_markup=kb_main_menu(),
     )
 
 
-async def _save_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save question and post to channel."""
-    user_id = update.effective_user.id
-    
-    data = user_data.get(user_id, {})
-    topic = data.get("topic")
-    question_text = data.get("question")
-    
-    if not topic or not question_text:
-        await update.message.reply_text("❌ Error saving question")
+# ═════════════════════════════════════════════════════════════════════════════
+# PROFILE
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def _handle_set_name(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str
+) -> None:
+    if not text or len(text) > 32:
+        await update.message.reply_text("❗ Name must be 1-32 characters. Try again:")
         return
-    
-    # Create question in database
-    question = create_question(user_id, topic, question_text)
-    
-    # Post to channel
+    await db.update_user(user_id, display_name=text)
+    user_state[user_id] = IDLE
+    await update.message.reply_text(
+        f"✅ Display name set to <b>{text}</b>!",
+        parse_mode="HTML",
+        reply_markup=kb_main_menu(),
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# QUESTION
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def _handle_question_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    text: str,
+    photo,
+) -> None:
+    if not text:
+        await update.message.reply_text("❗ Please write your question text.")
+        return
+
+    user_data.setdefault(user_id, {})
+    user_data[user_id]["question_text"] = text
+    if photo:
+        user_data[user_id]["image_file_id"] = photo.file_id
+        await _send_question_preview(update, context, user_id)
+    else:
+        await _send_question_preview(update, context, user_id)
+
+
+async def _send_question_preview(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+) -> None:
+    data = user_data.get(user_id, {})
+    topic = data.get("topic", "general")
+    text = data.get("question_text", "")
+    has_image = bool(data.get("image_file_id"))
+    image_note = "\n\n📷 <i>Image attached</i>" if has_image else ""
+
+    preview = (
+        f"<b>Preview your question:</b>\n\n"
+        f"<b>#{topic.upper()}</b>\n\n"
+        f"{text}{image_note}"
+    )
+    await update.message.reply_text(
+        preview,
+        parse_mode="HTML",
+        reply_markup=kb_confirm_question(has_image=has_image),
+    )
+
+
+async def post_question_to_channel(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+) -> None:
+    """Save question to DB and post to channel. Called after confirm."""
+    data = user_data.get(user_id, {})
+    topic = data.get("topic", "general")
+    text = data.get("question_text", "")
+    image_file_id = data.get("image_file_id")
+
+    question = await db.create_question(user_id, topic, text, image_file_id)
+    question_id = oid(question)
+    author = await db.get_user(user_id)
+
     try:
-        msg = await context.bot.send_message(
-            chat_id=CHANNEL_USERNAME,
-            text=(
-                f"<b>#{question['topic'].upper()}</b>\n\n"
-                f"{question['text']}\n\n"
-                f"<i>by {get_user(user_id)['display_name']}</i>"
-            ),
-            parse_mode="HTML"
-        )
-        
-        # Update question with message IDs
-        from database import update_question
-        update_question(question['id'], message_id=msg.message_id, chat_id=msg.chat_id)
-        
-        await update.message.reply_text(
-            "✅ Question posted!",
-            reply_markup=build_main_menu()
-        )
-    except Exception as e:
-        print(f"Error posting to channel: {e}")
-        await update.message.reply_text("❌ Error posting to channel")
-    
+        msg = await send_question_message(context, CHANNEL_USERNAME, question, author or {})
+        # Derive channel post URL
+        chan = CHANNEL_USERNAME.lstrip("@")
+        post_url = f"https://t.me/{chan}/{msg}"
+        await db.update_question(question_id, channel_message_id=msg, channel_post_url=post_url)
+    except Exception as exc:
+        logger.error("Failed to post question to channel: %s", exc)
+
     # Cleanup
     user_state.pop(user_id, None)
     user_data.pop(user_id, None)
+    return question
 
 
-async def _save_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Save reply to database and send to chat."""
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
+# ═════════════════════════════════════════════════════════════════════════════
+# REPLY
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def _handle_reply_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    text: str,
+    photo,
+) -> None:
+    if not text:
+        await update.message.reply_text("❗ Please write your reply text.")
+        return
+
+    user_data.setdefault(user_id, {})
+    user_data[user_id]["reply_text"] = text
+    if photo:
+        user_data[user_id]["image_file_id"] = photo.file_id
+
+    await _send_reply_preview(update, context, user_id)
+
+
+async def _send_reply_preview(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+) -> None:
+    data = user_data.get(user_id, {})
+    text = data.get("reply_text", "")
+    has_image = bool(data.get("image_file_id"))
+    image_note = "\n\n📷 <i>Image attached</i>" if has_image else ""
+
+    preview = f"<b>Preview your reply:</b>\n\n{text}{image_note}"
+    await update.message.reply_text(
+        preview,
+        parse_mode="HTML",
+        reply_markup=kb_confirm_reply(has_image=has_image),
+    )
+
+
+async def post_reply(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+) -> None:
+    """Save reply to DB, send to user chat, notify question author. Called after confirm."""
     data = user_data.get(user_id, {})
     question_id = data.get("question_id")
     parent_reply_id = data.get("parent_reply_id")
-    
-    if not question_id:
-        await update.message.reply_text("❌ Question not found")
+    text = data.get("reply_text", "")
+    image_file_id = data.get("image_file_id")
+
+    if not question_id or not text:
         return
-    
-    # Create reply
-    reply = create_reply(question_id, user_id, text, parent_reply_id)
-    
-    # For now, send reply to user's chat (not to channel)
-    # In production, you might post to channel and store message_id
+
+    reply = await db.create_reply(question_id, user_id, text, parent_reply_id, image_file_id)
+    question = await db.get_question(question_id)
+    author = await db.get_user(user_id)
+    reply_id = oid(reply)
+
+    # Determine reply_to_message_id for Telegram threading
+    reply_to_msg_id = None
+    if parent_reply_id:
+        parent = await db.get_reply(parent_reply_id)
+        if parent:
+            reply_to_msg_id = parent.get("telegram_message_id")
+
     try:
-        await send_reply(
-            context,
-            chat_id,
-            reply["id"],
-            question_id,
-            user_id
+        msg_id = await send_reply_message(
+            context, chat_id, reply, author or {}, question_id,
+            viewer_id=user_id, reply_to_message_id=reply_to_msg_id,
         )
-        
-        await update.message.reply_text("✅ Reply posted!")
-        
-        # Update channel message to show new answer count
-        question = get_question(question_id)
-        if question and question.get("message_id") and question.get("chat_id"):
-            try:
-                from utils import build_channel_question_keyboard
-                keyboard = build_channel_question_keyboard(question_id)
+        # Persist the Telegram message ID on the reply
+        await db.update_reply(reply_id, telegram_message_id=msg_id)
+    except Exception as exc:
+        logger.error("Error sending reply message: %s", exc)
+
+    # Notify question author
+    if question:
+        sender = author or {}
+        await notifications.notify_new_reply(context, question, reply, sender)
+
+        # Update channel post keyboard (new reply count)
+        try:
+            from utils import kb_channel_question
+            new_count = question.get("reply_count", 0) + 1
+            if question.get("channel_chat_id") and question.get("channel_message_id"):
                 await context.bot.edit_message_reply_markup(
-                    chat_id=question["chat_id"],
-                    message_id=question["message_id"],
-                    reply_markup=keyboard
+                    chat_id=question["channel_chat_id"],
+                    message_id=question["channel_message_id"],
+                    reply_markup=kb_channel_question(question_id, new_count),
                 )
-            except Exception as e:
-                print(f"Error updating channel message: {e}")
-    except Exception as e:
-        print(f"Error posting reply: {e}")
-        await update.message.reply_text("❌ Error posting reply")
-    
+        except Exception:
+            pass  # Non-critical
+
     # Cleanup
     user_state.pop(user_id, None)
     user_data.pop(user_id, None)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SEARCH
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def _handle_search(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    chat_id: int,
+    query: str,
+) -> None:
+    if not query:
+        await update.message.reply_text("❗ Please enter a search term.")
+        return
+
+    questions, total = await db.search_questions(query, page=0)
+    user_state[user_id] = IDLE
+
+    if not questions:
+        await update.message.reply_text(
+            f"🔍 No results for <b>{query}</b>.",
+            parse_mode="HTML",
+            reply_markup=kb_main_menu(),
+        )
+        return
+
+    import urllib.parse
+    q_enc = urllib.parse.quote(query)
+    has_next = total > len(questions)
+    kb = kb_search_nav(q_enc, page=0, has_next=has_next)
+
+    lines = [f"🔍 <b>Results for:</b> {query} ({total} found)\n"]
+    for i, q in enumerate(questions, 1):
+        preview = q["text"][:80].replace("\n", " ")
+        qid = oid(q)
+        from config import BOT_USERNAME
+        url = f"https://t.me/{BOT_USERNAME}?start=show_{qid}"
+        lines.append(f"{i}. <a href='{url}'>{preview}…</a>")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=kb,
+        disable_web_page_preview=True,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _is_muted(user: dict) -> bool:
+    from datetime import timezone
+    from datetime import datetime
+    if not user.get("is_muted"):
+        return False
+    muted_until = user.get("muted_until")
+    if muted_until is None:
+        return True
+    if muted_until.tzinfo is None:
+        muted_until = muted_until.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) < muted_until

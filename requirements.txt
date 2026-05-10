@@ -1,2 +1,4 @@
-python-telegram-bot
-python-dotenv
+python-telegram-bot[job-queue]==21.6
+motor==3.4.0
+pymongo==4.7.3
+python-dotenv==1.0.1

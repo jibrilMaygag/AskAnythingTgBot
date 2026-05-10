@@ -1,117 +1,119 @@
+"""
+start.py – /start command handler.
+
+Responsibilities:
+  • Create user profile on first interaction (default: Anonymous, no forced setup)
+  • Handle deep links:
+      start=answer_<question_id>   → jump straight to reply flow
+      start=show_<question_id>     → open question with paginated replies
+  • Show main menu
+"""
+
+import logging
+
 from telegram import Update
 from telegram.ext import ContextTypes
-from states import user_state, user_data, IDLE, SETTING_PROFILE, VIEWING_QUESTION
-from utils import build_main_menu, send_question, send_replies_batch, build_show_more_keyboard
-from database import get_user, create_user, get_question, set_view_offset
+
+import database as db
+from states import user_state, user_data, IDLE, WRITING_REPLY, VIEWING_QUESTION
+from utils import (
+    kb_main_menu, kb_show_more,
+    format_user_short,
+    send_question_message, send_replies_batch,
+    oid,
+)
+from config import REPLIES_PER_PAGE
+
+logger = logging.getLogger(__name__)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command and deep links."""
-    user_id = update.effective_user.id
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_user = update.effective_user
+    user_id = tg_user.id
     chat_id = update.effective_chat.id
-    
-    # Ensure user exists in database
-    if not get_user(user_id):
-        create_user(user_id, update.effective_user.username)
-    
-    # ============= DEEP LINKS =============
+
+    # Ensure user exists (default profile, no forced setup)
+    user = await db.get_or_create_user(
+        telegram_id=user_id,
+        username=tg_user.username,
+        first_name=tg_user.first_name,
+    )
+
+    # Check ban
+    if user.get("is_banned"):
+        await update.message.reply_text("🚫 You are banned from this community.")
+        return
+
+    # ── Deep links ─────────────────────────────────────────────────────────
     if context.args:
         payload = context.args[0]
-        
-        # Format: answer_QUESTION_ID (direct answer to question)
+
         if payload.startswith("answer_"):
-            question_id = payload.replace("answer_", "")
-            
-            question = get_question(question_id)
+            question_id = payload[7:]
+            question = await db.get_question(question_id)
             if not question:
-                await update.message.reply_text("❌ Question not found")
+                await update.message.reply_text("❌ Question not found.")
                 return
-            
-            user_state[user_id] = "WRITING_REPLY"
-            user_data[user_id] = {
-                "question_id": question_id,
-                "parent_reply_id": None,
-            }
-            await update.message.reply_text("✍️ Write your answer:")
+            user_state[user_id] = WRITING_REPLY
+            user_data[user_id] = {"question_id": question_id, "parent_reply_id": None}
+            await update.message.reply_text(
+                "✍️ Write your answer:"
+            )
             return
-        
-        # Format: reply_REPLY_ID:QUESTION_ID
-        if payload.startswith("reply_"):
-            parts = payload.replace("reply_", "").split(":")
-            reply_id = parts[0] if len(parts) > 0 else None
-            question_id = parts[1] if len(parts) > 1 else None
-            
-            if reply_id and question_id:
-                user_state[user_id] = "WRITING_REPLY_TO_REPLY"
-                user_data[user_id] = {
-                    "question_id": question_id,
-                    "parent_reply_id": reply_id,
-                }
-                await update.message.reply_text("✍️ Write your reply:")
-                return
-        
-        # Format: show_QUESTION_ID
-        elif payload.startswith("show_"):
-            question_id = payload.replace("show_", "")
-            await _show_question(update, context, question_id)
+
+        if payload.startswith("show_"):
+            question_id = payload[5:]
+            await _show_question(update, context, user_id, chat_id, question_id)
             return
-    
-    # ============= PROFILE CHECK =============
-    user = get_user(user_id)
-    if not user.get("display_name"):
-        user_state[user_id] = SETTING_PROFILE
-        await update.message.reply_text(
-            "👋 Welcome! Let's set up your profile first.\n\n"
-            "What's your display name?"
-        )
-        return
-    
-    # ============= MAIN MENU =============
+
+    # ── Main menu ──────────────────────────────────────────────────────────
+    name = format_user_short(user)
     user_state[user_id] = IDLE
     await update.message.reply_text(
-        f"💬 Welcome back, {user['display_name']}!",
-        reply_markup=build_main_menu()
+        f"👋 Welcome back, <b>{name}</b>!\n\nWhat would you like to do?",
+        parse_mode="HTML",
+        reply_markup=kb_main_menu(),
     )
 
 
-async def _show_question(update: Update, context: ContextTypes.DEFAULT_TYPE, question_id: str):
-    """Show a question and its replies."""
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    question = get_question(question_id)
+async def _show_question(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    chat_id: int,
+    question_id: str,
+) -> None:
+    question = await db.get_question(question_id)
     if not question:
-        await update.message.reply_text("❌ Question not found")
+        await update.message.reply_text("❌ Question not found.")
         return
-    
-    # Send question
-    await send_question(context, chat_id, question_id, user_id)
-    
-    # Track viewing state
+
+    author = await db.get_user(question["author_id"])
+
+    # Send question card
+    await send_question_message(context, chat_id, question, author or {})
+
+    # Update state
     user_state[user_id] = VIEWING_QUESTION
-    user_data[user_id] = {
-        "question_id": question_id,
-        "viewed_replies": 0,
-    }
-    
-    # Send first batch of replies
-    messages_sent, total = await send_replies_batch(
-        context,
-        chat_id,
-        question_id,
-        count=10,
-        offset=0,
-        user_id=user_id
+    user_data[user_id] = {"question_id": question_id}
+
+    # Send first page of replies
+    sent, total = await send_replies_batch(
+        context, chat_id, question_id,
+        offset=0, limit=REPLIES_PER_PAGE, viewer_id=user_id,
     )
-    
-    # Update offset
-    set_view_offset(user_id, question_id, messages_sent)
-    
-    # Show "Show More" button if applicable
-    if messages_sent < total:
-        show_more_kb = build_show_more_keyboard(question_id, messages_sent, total)
-        if show_more_kb:
-            await update.message.reply_text(
-                f"📄 Showing {messages_sent}/{total} replies",
-                reply_markup=show_more_kb
-            )
+
+    if total == 0:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="💬 No replies yet. Be the first to answer!",
+        )
+        return
+
+    if sent < total:
+        kb = kb_show_more(question_id, sent, total)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"📄 Showing {sent} of {total} replies",
+            reply_markup=kb,
+        )

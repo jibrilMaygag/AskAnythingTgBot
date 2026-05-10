@@ -1,23 +1,36 @@
 """
-Conversation states for user interactions.
-Format: user_state[user_id] = STATE_NAME
+states.py – Conversation state constants and in-memory state storage.
+
+State storage uses simple dicts (user_id → value).
+For multi-instance deployments, replace with Redis or DB-backed sessions.
 """
 
-# ============= MAIN STATES =============
-IDLE = "IDLE"  # User is at main menu
-CHOOSING_TOPIC = "CHOOSING_TOPIC"  # User selected "Ask Question"
-WRITING_QUESTION = "WRITING_QUESTION"  # User typing question
-CONFIRMING_QUESTION = "CONFIRMING_QUESTION"  # Question typed, awaiting confirm
-SETTING_PROFILE = "SETTING_PROFILE"  # User setting display name
-SETTING_GENDER = "SETTING_GENDER"  # User setting gender
+# ── Profile ───────────────────────────────────────────────────────────────────
+IDLE                    = "IDLE"
+SETTING_NAME            = "SETTING_NAME"
+SETTING_GENDER          = "SETTING_GENDER"
+SETTING_IMAGE           = "SETTING_IMAGE"
 
-# ============= REPLY STATES =============
-WRITING_REPLY = "WRITING_REPLY"  # User typing reply to question
-WRITING_REPLY_TO_REPLY = "WRITING_REPLY_TO_REPLY"  # User replying to a reply
+# ── Question flow ─────────────────────────────────────────────────────────────
+CHOOSING_TOPIC          = "CHOOSING_TOPIC"
+WRITING_QUESTION        = "WRITING_QUESTION"
+WRITING_QUESTION_IMAGE  = "WRITING_QUESTION_IMAGE"
+CONFIRMING_QUESTION     = "CONFIRMING_QUESTION"
 
-# ============= VIEW STATES =============
-VIEWING_QUESTION = "VIEWING_QUESTION"  # User viewing a question and its replies
+# ── Reply flow ────────────────────────────────────────────────────────────────
+WRITING_REPLY           = "WRITING_REPLY"
+WRITING_REPLY_IMAGE     = "WRITING_REPLY_IMAGE"
 
-# ============= STATE STORAGE =============
-user_state = {}  # user_id -> current state
-user_data = {}  # user_id -> {additional context data}
+# ── Navigation ────────────────────────────────────────────────────────────────
+VIEWING_QUESTION        = "VIEWING_QUESTION"
+
+# ── Search ────────────────────────────────────────────────────────────────────
+SEARCHING               = "SEARCHING"
+
+# ── Admin ─────────────────────────────────────────────────────────────────────
+ADMIN_BAN_INPUT         = "ADMIN_BAN_INPUT"
+ADMIN_MUTE_INPUT        = "ADMIN_MUTE_INPUT"
+
+# ── In-memory session stores ──────────────────────────────────────────────────
+user_state: dict[int, str] = {}   # user_id → current state constant
+user_data: dict[int, dict] = {}   # user_id → arbitrary context payload
