@@ -153,18 +153,16 @@ async def _send_question_preview(
     data = user_data.get(user_id, {})
     topic = data.get("topic", "general")
     text = data.get("question_text", "")
-    has_image = bool(data.get("image_file_id"))
-    image_note = "\n\n📷 <i>Image attached</i>" if has_image else ""
 
     preview = (
         f"<b>Preview your question:</b>\n\n"
         f"<b>#{topic.upper()}</b>\n\n"
-        f"{text}{image_note}"
+        f"{text}"
     )
     await update.message.reply_text(
         preview,
         parse_mode="HTML",
-        reply_markup=kb_confirm_question(has_image=has_image),
+        reply_markup=kb_confirm_question(),
     )
 
 
@@ -184,10 +182,15 @@ async def post_question_to_channel(
 
     try:
         msg = await send_question_message(context, CHANNEL_USERNAME, question, author or {})
-        # Derive channel post URL
+        # Derive channel post URL and persist the actual channel/chat ID
         chan = CHANNEL_USERNAME.lstrip("@")
-        post_url = f"https://t.me/{chan}/{msg}"
-        await db.update_question(question_id, channel_message_id=msg, channel_post_url=post_url)
+        post_url = f"https://t.me/{chan}/{msg.message_id}"
+        await db.update_question(
+            question_id,
+            channel_chat_id=msg.chat.id,
+            channel_message_id=msg.message_id,
+            channel_post_url=post_url,
+        )
     except Exception as exc:
         logger.error("Failed to post question to channel: %s", exc)
 
@@ -227,14 +230,12 @@ async def _send_reply_preview(
 ) -> None:
     data = user_data.get(user_id, {})
     text = data.get("reply_text", "")
-    has_image = bool(data.get("image_file_id"))
-    image_note = "\n\n📷 <i>Image attached</i>" if has_image else ""
 
-    preview = f"<b>Preview your reply:</b>\n\n{text}{image_note}"
+    preview = f"<b>Preview your reply:</b>\n\n{text}"
     await update.message.reply_text(
         preview,
         parse_mode="HTML",
-        reply_markup=kb_confirm_reply(has_image=has_image),
+        reply_markup=kb_confirm_reply(),
     )
 
 
@@ -271,7 +272,7 @@ async def post_reply(
             viewer_id=user_id, reply_to_message_id=reply_to_msg_id,
         )
         # Persist the Telegram message ID on the reply
-        await db.update_reply(reply_id, telegram_message_id=msg_id)
+        await db.update_reply(reply_id, telegram_message_id=msg_id, telegram_chat_id=chat_id)
     except Exception as exc:
         logger.error("Error sending reply message: %s", exc)
 
@@ -280,10 +281,10 @@ async def post_reply(
         sender = author or {}
         await notifications.notify_new_reply(context, question, reply, sender)
 
-        # Update channel post keyboard (new reply count)
+        # Update channel post keyboard to reflect the current reply count
         try:
             from utils import kb_channel_question
-            new_count = question.get("reply_count", 0) + 1
+            new_count = question.get("reply_count", 0)
             if question.get("channel_chat_id") and question.get("channel_message_id"):
                 await context.bot.edit_message_reply_markup(
                     chat_id=question["channel_chat_id"],

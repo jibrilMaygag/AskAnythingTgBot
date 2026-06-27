@@ -96,10 +96,8 @@ async def get_or_create_user(telegram_id: int, username: str = None, first_name:
             "$setOnInsert": {
                 "telegram_id": telegram_id,
                 "display_name": "Anonymous",
-                "username": username,
                 "first_name": first_name,
                 "gender": None,           # "M" | "F" | None
-                "profile_image": None,    # Telegram file_id
                 "reputation": 0,
                 "question_ids": [],
                 "reply_ids": [],
@@ -107,7 +105,6 @@ async def get_or_create_user(telegram_id: int, username: str = None, first_name:
                 "is_muted": False,
                 "muted_until": None,
                 "created_at": now,
-                "last_active": now,
             },
             "$set": {
                 "last_active": now,
@@ -144,7 +141,7 @@ async def get_leaderboard(page: int = 0) -> list[dict]:
     cursor = _db().users.find(
         {"is_banned": {"$ne": True}},
         {"telegram_id": 1, "display_name": 1, "gender": 1, "reputation": 1,
-         "username": 1, "profile_image": 1}
+         "username": 1}
     ).sort("reputation", DESCENDING).skip(skip).limit(LEADERBOARD_PER_PAGE)
     return await cursor.to_list(length=LEADERBOARD_PER_PAGE)
 
@@ -312,10 +309,19 @@ async def get_replies_for_question(
     question_id: str | ObjectId,
     offset: int = 0,
     limit: int = REPLIES_PER_PAGE,
+    exclude_reply_id: str | ObjectId = None,
 ) -> tuple[list[dict], int]:
     if isinstance(question_id, str):
         question_id = ObjectId(question_id)
     filt = {"question_id": question_id, "is_deleted": False}
+    if exclude_reply_id:
+        if isinstance(exclude_reply_id, str):
+            try:
+                exclude_reply_id = ObjectId(exclude_reply_id)
+            except Exception:
+                exclude_reply_id = None
+        if exclude_reply_id:
+            filt["_id"] = {"$ne": exclude_reply_id}
     total = await _db().replies.count_documents(filt)
     cursor = _db().replies.find(filt).sort("created_at", ASCENDING).skip(offset).limit(limit)
     items = await cursor.to_list(length=limit)
@@ -365,6 +371,16 @@ async def get_user_vote(target_id: str | ObjectId, user_id: int) -> Optional[str
             return None
     doc = await _db().votes.find_one({"target_id": target_id, "user_id": user_id})
     return doc["direction"] if doc else None
+
+
+async def has_report(target_id: str | ObjectId, user_id: int) -> bool:
+    if isinstance(target_id, str):
+        try:
+            target_id = ObjectId(target_id)
+        except Exception:
+            return False
+    doc = await _db().reports.find_one({"target_id": target_id, "reporter_id": user_id})
+    return bool(doc)
 
 
 async def cast_vote(

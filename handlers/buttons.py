@@ -13,7 +13,6 @@ Routing map (callback_data prefix → handler):
   profile                 → show profile card
   profile_set_name        → start name-change flow
   profile_set_gender      → show gender picker
-  profile_set_image       → ask for photo upload
   gender_*                → save gender
   vote_up:*               → upvote reply
   vote_down:*             → downvote reply
@@ -93,20 +92,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         topic = data[6:]
         user_state[user_id] = WRITING_QUESTION
         user_data[user_id] = {"topic": topic}
+        # Compact preview: inline lowercase tag without bold for smaller appearance
         await query.edit_message_text(
-            f"✍️ Topic: <b>#{topic.upper()}</b>\n\n"
-            "Send your question text (you can also attach a photo):",
-            parse_mode="HTML",
+            f"✍️ Topic: #{topic}\n\nSend your question text:",
         )
         return
 
-    if data == "add_question_image":
-        user_state[user_id] = WRITING_QUESTION_IMAGE
-        await query.edit_message_text("📷 Send the photo you want to attach:")
-        return
-
     if data == "confirm_question":
-        from message import post_question_to_channel
+        from handlers.message import post_question_to_channel
         await query.edit_message_text("⏳ Posting your question…")
         await post_question_to_channel(context, user_id)
         await context.bot.send_message(
@@ -117,13 +110,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # ── Reply ───────────────────────────────────────────────────────────────
-    if data == "add_reply_image":
-        user_state[user_id] = WRITING_REPLY_IMAGE
-        await query.edit_message_text("📷 Send the photo you want to attach to your reply:")
-        return
-
     if data == "confirm_reply":
-        from message import post_reply
+        from handlers.message import post_reply
         await query.edit_message_text("⏳ Posting your reply…")
         await post_reply(context, chat_id, user_id)
         await context.bot.send_message(
@@ -142,9 +130,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "question_id": question_id,
             "parent_reply_id": parent_reply_id,
         }
-        await query.edit_message_text(
-            "✍️ Write your reply (you can also attach a photo):"
-        )
+        # Keep the original reply message unchanged; send a separate prompt to the user
+        await context.bot.send_message(chat_id=chat_id, text="✍️ Write your reply:")
         return
 
     # ── Profile ─────────────────────────────────────────────────────────────
@@ -167,12 +154,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    if data == "profile_set_image":
-        user_state[user_id] = "SETTING_IMAGE"
-        await query.edit_message_text(
-            "🖼 Send a photo to use as your profile picture:"
-        )
-        return
+    # profile image functionality removed
 
     if data.startswith("gender_"):
         gender = data[7:]  # "M" | "F" | "skip"
@@ -212,6 +194,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.answer("🚩 Reply reported. Moderators will review it.", show_alert=True)
         else:
             await query.answer("Already reported.", show_alert=False)
+
+        reply = await db.get_reply(reply_id)
+        question_id = str(reply["question_id"]) if reply else ""
+        await update_reply_vote_keyboard(
+            context, chat_id, message_id, reply_id, question_id,
+            viewer_id=user_id,
+        )
         return
 
     # ── Pagination: replies ─────────────────────────────────────────────────

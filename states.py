@@ -9,7 +9,7 @@ For multi-instance deployments, replace with Redis or DB-backed sessions.
 IDLE                    = "IDLE"
 SETTING_NAME            = "SETTING_NAME"
 SETTING_GENDER          = "SETTING_GENDER"
-SETTING_IMAGE           = "SETTING_IMAGE"
+# SETTING_IMAGE removed — profile-picture functionality disabled
 
 # ── Question flow ─────────────────────────────────────────────────────────────
 CHOOSING_TOPIC          = "CHOOSING_TOPIC"

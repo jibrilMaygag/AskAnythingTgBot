@@ -74,31 +74,28 @@ def format_user_short(user: dict) -> str:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def format_question_text(question: dict, author: dict) -> str:
-    ts = time_ago(question["created_at"])
-    user_line = format_user_display(author)
-    topic = question.get("topic", "general").upper()
+    topic = question.get("topic", "general").lower()
+    author_name = format_user_short(author or {})
     return (
-        f"<b>#{topic}</b>\n\n"
-        f"{question['text']}\n\n"
-        f"<i>{user_line} • {ts}</i>"
+        f"#{topic}\n\n"
+        f"<b>{question['text']}</b>\n\n"
+        f"By: {author_name}"
     )
 
 
 def format_reply_text(reply: dict, author: dict) -> str:
     ts = time_ago(reply["created_at"])
     user_line = format_user_display(author)
-    up = reply.get("upvotes", 0)
-    down = reply.get("downvotes", 0)
     text = reply.get("text", "")
     return (
-        f"{user_line} • {ts}\n\n"
-        f"{text}\n\n"
-        f"👍 {up}  👎 {down}"
+        f"<b>{text}</b>\n\n"
+        f"By: {user_line}\n" 
+        f"{ts}"
     )
 
 
 def format_profile_text(user: dict) -> str:
-    name = user.get("display_name") or "Anonymous"
+    name = format_user_short(user or {})
     gender = {"M": "👨 Male", "F": "👩 Female"}.get(user.get("gender"), "Not set")
     rep = user.get("reputation", 0)
     questions = len(user.get("question_ids", []))
@@ -139,44 +136,47 @@ def kb_main_menu() -> InlineKeyboardMarkup:
 
 
 def kb_topic() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎓 Education", callback_data="topic_edu"),
-            InlineKeyboardButton("💻 Tech", callback_data="topic_tech"),
-        ],
-        [
-            InlineKeyboardButton("❤️ Life", callback_data="topic_life"),
-            InlineKeyboardButton("🌍 General", callback_data="topic_general"),
-        ],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
-    ])
+    topics = [
+        "Art", "Beauty", "Business", "Education", "Entertainment",
+        "Family", "Food", "Health", "History", "Language",
+        "Law", "Personal", "Philosophy", "Politics", "Relationships",
+        "Religion", "Science", "Sexual", "Society", "Sport",
+        "Technology", "Other",
+    ]
+    # Build two-column keyboard of topics (title-cased labels, callback uses lowercase)
+    rows = []
+    for i in range(0, len(topics), 2):
+        left = topics[i]
+        right = topics[i + 1] if i + 1 < len(topics) else None
+        if right:
+            rows.append([
+                InlineKeyboardButton(left, callback_data=f"topic_{left.lower()}"),
+                InlineKeyboardButton(right, callback_data=f"topic_{right.lower()}"),
+            ])
+        else:
+            rows.append([InlineKeyboardButton(left, callback_data=f"topic_{left.lower()}")])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+    return InlineKeyboardMarkup(rows)
 
 
 def kb_confirm_question(has_image: bool = False) -> InlineKeyboardMarkup:
-    rows = [[
+    return InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Post It", callback_data="confirm_question"),
         InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
-    ]]
-    if not has_image:
-        rows.insert(0, [InlineKeyboardButton("📷 Add Image", callback_data="add_question_image")])
-    return InlineKeyboardMarkup(rows)
+    ]])
 
 
 def kb_confirm_reply(has_image: bool = False) -> InlineKeyboardMarkup:
-    rows = [[
+    return InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Post Reply", callback_data="confirm_reply"),
         InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
-    ]]
-    if not has_image:
-        rows.insert(0, [InlineKeyboardButton("📷 Add Image", callback_data="add_reply_image")])
-    return InlineKeyboardMarkup(rows)
+    ]])
 
 
 def kb_profile() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ Change Name", callback_data="profile_set_name")],
         [InlineKeyboardButton("🚻 Set Gender", callback_data="profile_set_gender")],
-        [InlineKeyboardButton("🖼 Change Photo", callback_data="profile_set_image")],
         [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
     ])
 
@@ -191,13 +191,25 @@ def kb_gender(include_skip: bool = True) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([row])
 
 
-def kb_reply(reply_id: str, question_id: str, user_vote: Optional[str] = None) -> InlineKeyboardMarkup:
-    up_label = "👍✓" if user_vote == "up" else "👍"
-    dn_label = "👎✓" if user_vote == "down" else "👎"
+def kb_reply(
+    reply_id: str,
+    question_id: str,
+    user_vote: Optional[str] = None,
+    up_count: int = 0,
+    dn_count: int = 0,
+    is_flagged: bool = False,
+) -> InlineKeyboardMarkup:
+    flag_label = "🚩 Flagged" if is_flagged else "🚩"
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(up_label, callback_data=f"vote_up:{reply_id}:{question_id}"),
-        InlineKeyboardButton(dn_label, callback_data=f"vote_down:{reply_id}:{question_id}"),
-        InlineKeyboardButton("🚩", callback_data=f"report_reply:{reply_id}"),
+        InlineKeyboardButton(
+            f"👍{'✓' if user_vote == 'up' else ''} {up_count}",
+            callback_data=f"vote_up:{reply_id}:{question_id}"
+        ),
+        InlineKeyboardButton(
+            f"👎{'✓' if user_vote == 'down' else ''} {dn_count}",
+            callback_data=f"vote_down:{reply_id}:{question_id}"
+        ),
+        InlineKeyboardButton(flag_label, callback_data=f"report_reply:{reply_id}"),
         InlineKeyboardButton("💬 Reply", callback_data=f"reply_to:{reply_id}:{question_id}"),
     ]])
 
@@ -301,7 +313,7 @@ async def send_question_message(
             parse_mode="HTML",
             reply_markup=keyboard,
         )
-    return msg.message_id
+    return msg
 
 
 async def send_reply_message(
@@ -317,9 +329,18 @@ async def send_reply_message(
     text = format_reply_text(reply, author)
     reply_id = oid(reply)
     user_vote = None
+    is_flagged = False
     if viewer_id:
         user_vote = await db.get_user_vote(reply["_id"], viewer_id)
-    keyboard = kb_reply(reply_id, question_id, user_vote)
+        is_flagged = await db.has_report(reply["_id"], viewer_id)
+    keyboard = kb_reply(
+        reply_id,
+        question_id,
+        user_vote,
+        up_count=reply.get("upvotes", 0),
+        dn_count=reply.get("downvotes", 0),
+        is_flagged=is_flagged,
+    )
 
     kwargs = dict(chat_id=chat_id, parse_mode="HTML", reply_markup=keyboard)
     if reply_to_message_id:
@@ -344,16 +365,36 @@ async def send_replies_batch(
     offset: int = 0,
     limit: int = REPLIES_PER_PAGE,
     viewer_id: int = None,
+    exclude_reply_id: str = None,
 ) -> tuple[int, int]:
     """Send a page of replies. Returns (sent_count, total)."""
-    replies, total = await db.get_replies_for_question(question_id, offset=offset, limit=limit)
+    replies, total = await db.get_replies_for_question(
+        question_id,
+        offset=offset,
+        limit=limit,
+        exclude_reply_id=exclude_reply_id,
+    )
     sent = 0
     for reply in replies:
         author = await db.get_user(reply["author_id"])
         try:
-            await send_reply_message(
-                context, chat_id, reply, author or {}, question_id, viewer_id
+            # If this reply references a parent reply, try to set reply_to_message_id
+            reply_to_msg_id = None
+            parent_id = reply.get("parent_reply_id")
+            if parent_id:
+                parent = await db.get_reply(parent_id)
+                if parent and parent.get("telegram_message_id") and parent.get("telegram_chat_id") == chat_id:
+                    reply_to_msg_id = parent.get("telegram_message_id")
+
+            msg_id = await send_reply_message(
+                context, chat_id, reply, author or {}, question_id, viewer_id, reply_to_message_id=reply_to_msg_id
             )
+            # Persist Telegram message id and chat id for this reply so future "reply-to" targets
+            # can reference it and create native clickable reply links.
+            try:
+                await db.update_reply(oid(reply), telegram_message_id=msg_id, telegram_chat_id=chat_id)
+            except Exception:
+                logger.debug("Could not persist telegram_message_id for reply %s", reply.get("_id"))
             sent += 1
         except Exception as exc:
             logger.warning("Error sending reply %s: %s", reply["_id"], exc)
@@ -369,9 +410,20 @@ async def update_reply_vote_keyboard(
     viewer_id: int = None,
 ) -> None:
     user_vote = None
+    is_flagged = False
     if viewer_id:
         user_vote = await db.get_user_vote(reply_id, viewer_id)
-    keyboard = kb_reply(reply_id, question_id, user_vote)
+        is_flagged = await db.has_report(reply_id, viewer_id)
+    # We don't currently know the reply counts here, so refresh from DB if needed.
+    reply = await db.get_reply(reply_id)
+    keyboard = kb_reply(
+        reply_id,
+        question_id,
+        user_vote,
+        up_count=reply.get("upvotes", 0) if reply else 0,
+        dn_count=reply.get("downvotes", 0) if reply else 0,
+        is_flagged=is_flagged,
+    )
     try:
         await context.bot.edit_message_reply_markup(
             chat_id=chat_id, message_id=message_id, reply_markup=keyboard

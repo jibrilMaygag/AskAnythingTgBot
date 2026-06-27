@@ -88,10 +88,7 @@ def main() -> None:
         )
     )
 
-    # ── Profile image upload (state = SETTING_IMAGE) ──────────────────────
-    app.add_handler(
-        MessageHandler(filters.PHOTO, _handle_profile_image)
-    )
+    # ── Profile image upload handler removed (feature disabled)
 
     # ── Error handler ─────────────────────────────────────────────────────
     app.add_error_handler(error_handler)
@@ -106,29 +103,15 @@ def main() -> None:
     )
 
     logger.info("Bot is starting…")
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     app.run_polling(poll_interval=2, drop_pending_updates=True)
 
 
-async def _handle_profile_image(update: Update, context) -> None:
-    """Save profile image file_id for users in SETTING_IMAGE state."""
-    from states import user_state, IDLE
-    import database as db
-    from utils import kb_profile, format_profile_text
-
-    user_id = update.effective_user.id
-    if user_state.get(user_id) != "SETTING_IMAGE":
-        return  # Let message_handler deal with it normally
-
-    photo = update.message.photo[-1]
-    await db.update_user(user_id, profile_image=photo.file_id)
-    user_state[user_id] = IDLE
-    user = await db.get_user(user_id)
-
-    await update.message.reply_text(
-        "🖼 Profile photo updated!\n\n" + format_profile_text(user or {}),
-        parse_mode="HTML",
-        reply_markup=kb_profile(),
-    )
+# Profile image handler removed; profile-picture functionality disabled project-wide.
 
 
 if __name__ == "__main__":

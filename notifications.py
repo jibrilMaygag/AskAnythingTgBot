@@ -12,6 +12,7 @@ from typing import Optional
 from telegram.ext import ContextTypes
 
 import database as db
+from config import BOT_USERNAME
 from utils import format_user_short, oid
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,6 @@ def _build_new_reply_payload(
         "sender_display": format_user_short(sender),
         "sender_rep": sender.get("reputation", 0),
         "reply_preview": reply["text"][:120],
-        "channel_post_url": question.get("channel_post_url"),
     }
 
 
@@ -43,16 +43,18 @@ def _format_new_reply_message(payload: dict) -> str:
     sender = payload["sender_display"]
     rep = payload["sender_rep"]
     preview = payload["reply_preview"]
-    url = payload.get("channel_post_url", "")
+    question_id = payload.get("question_id")
+    reply_id = payload.get("reply_id")
+    deep_link = f"https://t.me/{BOT_USERNAME}?start=show_{question_id}_{reply_id}"
 
-    link_line = f"\n{url}" if url else ""
     return (
         f"🎉 <b>You've got a new answer!</b>\n\n"
-        f"{sender} just responded to your question:{link_line}\n\n"
-        f"If it helped you, show some appreciation with an upvote 👍\n\n"
+        f"{sender} just responded to your question.\n\n"
+        f"<i>Tap to open the question and jump to the reply.</i>\n\n"
         f"──────────────\n"
         f'💬 "{preview}"\n\n'
-        f"By: {sender} 🎖 {rep} rep"
+        f"By: {sender} 🎖 {rep} rep\n\n"
+        f"<a href=\"{deep_link}\">Open this reply</a>"
     )
 
 

@@ -19,7 +19,7 @@ from states import user_state, user_data, IDLE, WRITING_REPLY, VIEWING_QUESTION
 from utils import (
     kb_main_menu, kb_show_more,
     format_user_short,
-    send_question_message, send_replies_batch,
+    send_question_message, send_reply_message, send_replies_batch,
     oid,
 )
 from config import REPLIES_PER_PAGE
@@ -54,16 +54,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not question:
                 await update.message.reply_text("❌ Question not found.")
                 return
+            # Show the question first, then prompt the user to write their reply
+            author = await db.get_user(question["author_id"])
+            await send_question_message(context, chat_id, question, author or {})
             user_state[user_id] = WRITING_REPLY
             user_data[user_id] = {"question_id": question_id, "parent_reply_id": None}
-            await update.message.reply_text(
-                "✍️ Write your answer:"
-            )
+            await update.message.reply_text("✍️ Write your answer:")
             return
 
         if payload.startswith("show_"):
-            question_id = payload[5:]
-            await _show_question(update, context, user_id, chat_id, question_id)
+            payload_body = payload[5:]
+            if "_" in payload_body:
+                question_id, reply_id = payload_body.split("_", 1)
+                await _show_question(update, context, user_id, chat_id, question_id, highlight_reply_id=reply_id)
+            else:
+                question_id = payload_body
+                await _show_question(update, context, user_id, chat_id, question_id)
             return
 
     # ── Main menu ──────────────────────────────────────────────────────────
@@ -82,6 +88,7 @@ async def _show_question(
     user_id: int,
     chat_id: int,
     question_id: str,
+    highlight_reply_id: str = None,
 ) -> None:
     question = await db.get_question(question_id)
     if not question:
@@ -93,6 +100,30 @@ async def _show_question(
     # Send question card
     await send_question_message(context, chat_id, question, author or {})
 
+    # If the user opened a specific reply, send it first as the highlighted reply
+    if highlight_reply_id:
+        reply = await db.get_reply(highlight_reply_id)
+        if reply and str(reply.get("question_id")) == question_id:
+            reply_author = await db.get_user(reply["author_id"])
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🔹 Highlighted reply:",
+            )
+            reply_to_msg_id = None
+            if reply.get("parent_reply_id"):
+                parent = await db.get_reply(reply["parent_reply_id"])
+                if parent and parent.get("telegram_message_id") and parent.get("telegram_chat_id") == chat_id:
+                    reply_to_msg_id = parent.get("telegram_message_id")
+            await send_reply_message(
+                context,
+                chat_id,
+                reply,
+                reply_author or {},
+                question_id,
+                viewer_id=user_id,
+                reply_to_message_id=reply_to_msg_id,
+            )
+
     # Update state
     user_state[user_id] = VIEWING_QUESTION
     user_data[user_id] = {"question_id": question_id}
@@ -101,6 +132,7 @@ async def _show_question(
     sent, total = await send_replies_batch(
         context, chat_id, question_id,
         offset=0, limit=REPLIES_PER_PAGE, viewer_id=user_id,
+        exclude_reply_id=highlight_reply_id,
     )
 
     if total == 0:
