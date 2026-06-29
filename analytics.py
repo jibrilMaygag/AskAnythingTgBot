@@ -21,13 +21,19 @@ async def get_dashboard_text() -> str:
     stats = await db.get_stats_snapshot()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     return (
-        f"📊 <b>Dashboard Snapshot</b>\n"
+        f"📊 <b>Moderation Statistics</b>\n"
         f"<i>{now}</i>\n\n"
-        f"👥 Total users:      <b>{stats['total_users']}</b>\n"
-        f"🟢 Active today:     <b>{stats['active_users_today']}</b>\n"
-        f"❓ Questions:         <b>{stats['total_questions']}</b>\n"
-        f"💬 Replies:           <b>{stats['total_replies']}</b>\n"
-        f"🚩 Pending reports:  <b>{stats['pending_reports']}</b>\n"
+        f"👥 Total users:          <b>{stats['total_users']}</b>\n"
+        f"🟢 Active today:         <b>{stats['active_users_today']}</b>\n"
+        f"❓ Total questions:      <b>{stats['total_questions']}</b>\n"
+        f"⏳ Pending questions:    <b>{stats['pending_questions']}</b>\n"
+        f"✅ Approved questions:  <b>{stats['approved_questions']}</b>\n"
+        f"💬 Answers / replies:   <b>{stats['total_answers']}</b>\n"
+        f"🚩 Pending reports:      <b>{stats['pending_reports']}</b>\n"
+        f"🚫 Banned users:         <b>{stats['banned_users']}</b>\n"
+        f"🔇 Muted users:          <b>{stats['muted_users']}</b>\n"
+        f"📅 Questions today:     <b>{stats['questions_today']}</b>\n"
+        f"📅 Answers today:       <b>{stats['answers_today']}</b>\n"
     )
 
 

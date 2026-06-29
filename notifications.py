@@ -96,6 +96,54 @@ async def notify_new_reply(
         logger.info("Could not deliver notification to %s: %s", author_id, exc)
 
 
+async def notify_question_approved(
+    context: ContextTypes.DEFAULT_TYPE,
+    question: dict,
+    author: dict,
+) -> None:
+    author_id = question.get("author_id")
+    if not author_id:
+        return
+    payload = {
+        "type": "question_approved",
+        "question_id": str(question["_id"]),
+        "topic": question.get("topic", "general"),
+    }
+    await db.create_notification(author_id, payload)
+    text = (
+        f"✅ <b>Your question was approved</b>\n\n"
+        f"It is now live in the community."
+    )
+    try:
+        await context.bot.send_message(chat_id=author_id, text=text, parse_mode="HTML")
+    except Exception as exc:
+        logger.info("Could not deliver approval notification to %s: %s", author_id, exc)
+
+
+async def notify_question_rejected(
+    context: ContextTypes.DEFAULT_TYPE,
+    question: dict,
+    author: dict,
+    reason: str = None,
+) -> None:
+    author_id = question.get("author_id")
+    if not author_id:
+        return
+    payload = {
+        "type": "question_rejected",
+        "question_id": str(question["_id"]),
+        "reason": reason,
+    }
+    await db.create_notification(author_id, payload)
+    text = "❌ <b>Your question was rejected</b>"
+    if reason:
+        text += f"\nReason: {reason}"
+    try:
+        await context.bot.send_message(chat_id=author_id, text=text, parse_mode="HTML")
+    except Exception as exc:
+        logger.info("Could not deliver rejection notification to %s: %s", author_id, exc)
+
+
 async def notify_reputation_change(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,

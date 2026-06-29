@@ -100,11 +100,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data == "confirm_question":
         from handlers.message import post_question_to_channel
-        await query.edit_message_text("⏳ Posting your question…")
+        await query.edit_message_text("⏳ Sending your question for review…")
         await post_question_to_channel(context, user_id)
         await context.bot.send_message(
             chat_id=chat_id,
-            text="✅ Question posted!",
+            text="✅ Your question has been submitted for review.",
             reply_markup=kb_main_menu(),
         )
         return
@@ -137,7 +137,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ── Profile ─────────────────────────────────────────────────────────────
     if data == "profile":
         user = await db.get_user(user_id)
-        text = format_profile_text(user or {})
+        text = await format_profile_text(user or {})
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb_profile())
         return
 
@@ -162,8 +162,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await db.update_user(user_id, gender=gender)
         user_state[user_id] = IDLE
         user = await db.get_user(user_id)
+        profile_text = await format_profile_text(user or {})
         await query.edit_message_text(
-            "✅ Gender updated!\n\n" + format_profile_text(user or {}),
+            "✅ Gender updated!\n\n" + profile_text,
             parse_mode="HTML",
             reply_markup=kb_profile(),
         )

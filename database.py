@@ -55,12 +55,15 @@ async def create_indexes() -> None:
     await db.questions.create_index([("created_at", DESCENDING)])
     await db.questions.create_index([("reply_count", DESCENDING)])
     await db.questions.create_index([("text", TEXT), ("topic", TEXT)])
-    await db.questions.create_index("author_id")
+    await db.questions.create_index([("author_id", ASCENDING), ("status", ASCENDING)])
+    await db.questions.create_index([("status", ASCENDING)])
+    await db.questions.create_index([("author_id", ASCENDING)])
 
     await db.replies.create_index("question_id")
-    await db.replies.create_index("author_id")
+    await db.replies.create_index([("author_id", ASCENDING)])
     await db.replies.create_index([("created_at", ASCENDING)])
     await db.replies.create_index("parent_reply_id")
+    await db.replies.create_index([("author_id", ASCENDING), ("created_at", ASCENDING)])
 
     await db.votes.create_index([("target_id", ASCENDING), ("user_id", ASCENDING)], unique=True)
     await db.votes.create_index("target_id")
@@ -75,6 +78,9 @@ async def create_indexes() -> None:
     await db.analytics.create_index([("date", DESCENDING)])
     await db.analytics.create_index("event")
 
+    await db.admin_logs.create_index([("created_at", DESCENDING)])
+    await db.admin_logs.create_index("action")
+
     logger.info("MongoDB indexes created.")
 
 
@@ -84,6 +90,14 @@ async def create_indexes() -> None:
 
 async def get_user(telegram_id: int) -> Optional[dict]:
     return await _db().users.find_one({"telegram_id": telegram_id})
+
+
+async def get_user_question_count(telegram_id: int) -> int:
+    return await _db().questions.count_documents({"author_id": telegram_id, "is_deleted": False, "status": {"$in": ["approved", "pending", "rejected"]}})
+
+
+async def get_user_reply_count(telegram_id: int) -> int:
+    return await _db().replies.count_documents({"author_id": telegram_id, "is_deleted": False})
 
 
 async def get_or_create_user(telegram_id: int, username: str = None, first_name: str = None) -> dict:
@@ -99,8 +113,6 @@ async def get_or_create_user(telegram_id: int, username: str = None, first_name:
                 "first_name": first_name,
                 "gender": None,           # "M" | "F" | None
                 "reputation": 0,
-                "question_ids": [],
-                "reply_ids": [],
                 "is_banned": False,
                 "is_muted": False,
                 "muted_until": None,
@@ -151,9 +163,18 @@ async def get_top_contributors(page: int = 0) -> list[dict]:
     skip = page * LEADERBOARD_PER_PAGE
     pipeline = [
         {"$match": {"is_banned": {"$ne": True}}},
+        {"$lookup": {
+            "from": "replies",
+            "localField": "telegram_id",
+            "foreignField": "author_id",
+            "as": "reply_docs",
+        }},
         {"$project": {
-            "telegram_id": 1, "display_name": 1, "gender": 1,
-            "reputation": 1, "reply_count": {"$size": "$reply_ids"}
+            "telegram_id": 1,
+            "display_name": 1,
+            "gender": 1,
+            "reputation": 1,
+            "reply_count": {"$size": "$reply_docs"},
         }},
         {"$sort": {"reply_count": -1}},
         {"$skip": skip},
@@ -178,33 +199,40 @@ async def create_question(
         "topic": topic,
         "text": text,
         "image_file_id": image_file_id,
+        "content_rating": "normal",
         "reply_count": 0,
         "channel_message_id": None,
         "channel_chat_id": None,
         "channel_post_url": None,
         "is_deleted": False,
+        "status": "pending",
+        "reviewed_by": None,
+        "reviewed_at": None,
+        "review_reason": None,
         "created_at": now,
         "updated_at": now,
     }
     result = await _db().questions.insert_one(doc)
     doc["_id"] = result.inserted_id
 
-    # Append to user's question list and add reputation
     await _db().users.update_one(
         {"telegram_id": author_id},
-        {"$push": {"question_ids": result.inserted_id}, "$inc": {"reputation": REP_QUESTION_POSTED}},
+        {"$inc": {"reputation": REP_QUESTION_POSTED}},
     )
     await _track_event("question_created")
     return doc
 
 
-async def get_question(question_id: str | ObjectId) -> Optional[dict]:
+async def get_question(question_id: str | ObjectId, include_pending: bool = False) -> Optional[dict]:
     if isinstance(question_id, str):
         try:
             question_id = ObjectId(question_id)
         except Exception:
             return None
-    return await _db().questions.find_one({"_id": question_id, "is_deleted": False})
+    filt = {"_id": question_id, "is_deleted": False}
+    if not include_pending:
+        filt["$or"] = [{"status": {"$exists": False}}, {"status": "approved"}]
+    return await _db().questions.find_one(filt)
 
 
 async def update_question(question_id: str | ObjectId, **fields) -> Optional[dict]:
@@ -222,15 +250,45 @@ async def soft_delete_question(question_id: str | ObjectId) -> bool:
     if isinstance(question_id, str):
         question_id = ObjectId(question_id)
     res = await _db().questions.update_one(
-        {"_id": question_id}, {"$set": {"is_deleted": True, "updated_at": now_utc()}}
+        {"_id": question_id}, {"$set": {"is_deleted": True, "status": "deleted", "updated_at": now_utc()}}
     )
     return res.modified_count > 0
 
 
+async def get_pending_questions(skip: int = 0, limit: int = 20) -> list[dict]:
+    cursor = _db().questions.find(
+        {"is_deleted": False, "status": "pending"}
+    ).sort("created_at", ASCENDING).skip(skip).limit(limit)
+    return await cursor.to_list(length=limit)
+
+
+async def approve_question(question_id: str | ObjectId, admin_id: int, content_rating: str = "normal") -> Optional[dict]:
+    if isinstance(question_id, str):
+        question_id = ObjectId(question_id)
+    if content_rating not in {"normal", "sensitive"}:
+        content_rating = "normal"
+    return await _db().questions.find_one_and_update(
+        {"_id": question_id},
+        {"$set": {"status": "approved", "content_rating": content_rating, "reviewed_by": admin_id, "reviewed_at": now_utc(), "review_reason": None, "updated_at": now_utc()}},
+        return_document=True,
+    )
+
+
+async def reject_question(question_id: str | ObjectId, admin_id: int, reason: str = None) -> Optional[dict]:
+    if isinstance(question_id, str):
+        question_id = ObjectId(question_id)
+    return await _db().questions.find_one_and_update(
+        {"_id": question_id},
+        {"$set": {"status": "rejected", "content_rating": "normal", "reviewed_by": admin_id, "reviewed_at": now_utc(), "review_reason": reason, "updated_at": now_utc()}},
+        return_document=True,
+    )
+
+
 async def get_trending_questions(page: int = 0) -> tuple[list[dict], int]:
     skip = page * TRENDING_PER_PAGE
-    total = await _db().questions.count_documents({"is_deleted": False})
-    cursor = _db().questions.find({"is_deleted": False}).sort(
+    filt = {"is_deleted": False, "$or": [{"status": {"$exists": False}}, {"status": "approved"}]}
+    total = await _db().questions.count_documents(filt)
+    cursor = _db().questions.find(filt).sort(
         "reply_count", DESCENDING
     ).skip(skip).limit(TRENDING_PER_PAGE)
     items = await cursor.to_list(length=TRENDING_PER_PAGE)
@@ -239,7 +297,7 @@ async def get_trending_questions(page: int = 0) -> tuple[list[dict], int]:
 
 async def search_questions(query: str, page: int = 0) -> tuple[list[dict], int]:
     skip = page * SEARCH_PER_PAGE
-    filt = {"$text": {"$search": query}, "is_deleted": False}
+    filt = {"$text": {"$search": query}, "is_deleted": False, "$or": [{"status": {"$exists": False}}, {"status": "approved"}]}
     total = await _db().questions.count_documents(filt)
     cursor = _db().questions.find(
         filt,
@@ -287,10 +345,9 @@ async def create_reply(
         {"_id": question_id},
         {"$inc": {"reply_count": 1}, "$set": {"updated_at": now}},
     )
-    # Update user stats
     await _db().users.update_one(
         {"telegram_id": author_id},
-        {"$push": {"reply_ids": result.inserted_id}, "$inc": {"reputation": REP_ANSWER_POSTED}},
+        {"$inc": {"reputation": REP_ANSWER_POSTED}},
     )
     await _track_event("reply_created")
     return doc
@@ -472,9 +529,18 @@ async def add_report(
         return False
 
 
-async def get_pending_reports(limit: int = 20) -> list[dict]:
-    cursor = _db().reports.find({"resolved": False}).sort("created_at", ASCENDING).limit(limit)
+async def get_pending_reports(limit: int = 20, skip: int = 0) -> list[dict]:
+    cursor = _db().reports.find({"resolved": False}).sort("created_at", ASCENDING).skip(skip).limit(limit)
     return await cursor.to_list(length=limit)
+
+
+async def count_reports_for_target(target_id: str | ObjectId, target_type: str) -> int:
+    if isinstance(target_id, str):
+        try:
+            target_id = ObjectId(target_id)
+        except Exception:
+            return 0
+    return await _db().reports.count_documents({"target_id": target_id, "target_type": target_type, "resolved": False})
 
 
 async def resolve_report(report_id: str | ObjectId, admin_id: int, action: str) -> bool:
@@ -485,6 +551,31 @@ async def resolve_report(report_id: str | ObjectId, admin_id: int, action: str) 
         {"$set": {"resolved": True, "resolved_by": admin_id, "action": action, "resolved_at": now_utc()}},
     )
     return res.modified_count > 0
+
+
+async def resolve_reports_for_target(target_id: str | ObjectId, target_type: str, admin_id: int, action: str) -> int:
+    if isinstance(target_id, str):
+        try:
+            target_id = ObjectId(target_id)
+        except Exception:
+            return 0
+    res = await _db().reports.update_many(
+        {"target_id": target_id, "target_type": target_type, "resolved": False},
+        {"$set": {"resolved": True, "resolved_by": admin_id, "action": action, "resolved_at": now_utc()}},
+    )
+    return res.modified_count
+
+
+async def log_admin_action(action: str, admin_id: int, details: dict | None = None) -> dict:
+    doc = {
+        "action": action,
+        "admin_id": admin_id,
+        "details": details or {},
+        "created_at": now_utc(),
+    }
+    result = await _db().admin_logs.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return doc
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -537,19 +628,32 @@ async def _track_event(event: str, meta: dict = None) -> None:
 
 async def get_stats_snapshot() -> dict:
     db = _db()
-    total_users = await db.users.count_documents({})
-    active_users = await db.users.count_documents(
-        {"last_active": {"$gte": now_utc().replace(hour=0, minute=0, second=0, microsecond=0)}}
-    )
+    now = now_utc()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    approved_filter = {"is_deleted": False, "$or": [{"status": {"$exists": False}}, {"status": "approved"}]}
+    pending_filter = {"is_deleted": False, "status": "pending"}
     total_questions = await db.questions.count_documents({"is_deleted": False})
-    total_replies = await db.replies.count_documents({"is_deleted": False})
+    pending_questions = await db.questions.count_documents(pending_filter)
+    approved_questions = await db.questions.count_documents(approved_filter)
+    total_answers = await db.replies.count_documents({"is_deleted": False})
     total_reports = await db.reports.count_documents({"resolved": False})
+    total_banned = await db.users.count_documents({"is_banned": True})
+    total_muted = await db.users.count_documents({"is_muted": True})
+    questions_today = await db.questions.count_documents({"is_deleted": False, "created_at": {"$gte": day_start}})
+    answers_today = await db.replies.count_documents({"is_deleted": False, "created_at": {"$gte": day_start}})
     return {
-        "total_users": total_users,
-        "active_users_today": active_users,
+        "total_users": await db.users.count_documents({}),
+        "active_users_today": await db.users.count_documents({"last_active": {"$gte": day_start}}),
         "total_questions": total_questions,
-        "total_replies": total_replies,
+        "pending_questions": pending_questions,
+        "approved_questions": approved_questions,
+        "total_answers": total_answers,
+        "total_replies": total_answers,
         "pending_reports": total_reports,
+        "banned_users": total_banned,
+        "muted_users": total_muted,
+        "questions_today": questions_today,
+        "answers_today": answers_today,
     }
 
 

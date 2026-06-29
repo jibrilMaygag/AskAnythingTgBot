@@ -20,6 +20,7 @@ from telegram.ext import ContextTypes
 import database as db
 import notifications
 from config import CHANNEL_USERNAME, REPLIES_PER_PAGE
+from logging_utils import log_event
 from states import (
     user_state, user_data,
     IDLE, SETTING_NAME,
@@ -32,10 +33,13 @@ from utils import (
     kb_show_more, kb_search_nav,
     send_question_message, send_reply_message, send_replies_batch,
     format_question_text, format_reply_text,
-    oid,
+    oid, SimpleRateLimiter, sanitize_text_content, validate_topic,
 )
 
 logger = logging.getLogger(__name__)
+
+QUESTION_RATE_LIMITER = SimpleRateLimiter(limit=3, window_seconds=60)
+REPLY_RATE_LIMITER = SimpleRateLimiter(limit=8, window_seconds=60)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -109,10 +113,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def _handle_set_name(
     update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str
 ) -> None:
-    if not text or len(text) > 32:
+    cleaned = sanitize_text_content(text, max_length=32)
+    if not cleaned or len(cleaned) > 32:
         await update.message.reply_text("❗ Name must be 1-32 characters. Try again:")
         return
-    await db.update_user(user_id, display_name=text)
+    await db.update_user(user_id, display_name=cleaned)
     user_state[user_id] = IDLE
     await update.message.reply_text(
         f"✅ Display name set to <b>{text}</b>!",
@@ -132,12 +137,16 @@ async def _handle_question_text(
     text: str,
     photo,
 ) -> None:
-    if not text:
+    cleaned_text = sanitize_text_content(text, max_length=3000)
+    if not cleaned_text:
         await update.message.reply_text("❗ Please write your question text.")
+        return
+    if not QUESTION_RATE_LIMITER.allow(str(user_id), "question"):
+        await update.message.reply_text("⏳ You are sending questions too quickly. Please wait a moment.")
         return
 
     user_data.setdefault(user_id, {})
-    user_data[user_id]["question_text"] = text
+    user_data[user_id]["question_text"] = cleaned_text
     if photo:
         user_data[user_id]["image_file_id"] = photo.file_id
         await _send_question_preview(update, context, user_id)
@@ -170,29 +179,17 @@ async def post_question_to_channel(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
 ) -> None:
-    """Save question to DB and post to channel. Called after confirm."""
+    """Save question to DB as pending for admin review."""
     data = user_data.get(user_id, {})
     topic = data.get("topic", "general")
-    text = data.get("question_text", "")
+    text = sanitize_text_content(data.get("question_text", ""), max_length=3000)
     image_file_id = data.get("image_file_id")
 
-    question = await db.create_question(user_id, topic, text, image_file_id)
-    question_id = oid(question)
-    author = await db.get_user(user_id)
+    if not text or not validate_topic(topic):
+        return None
 
-    try:
-        msg = await send_question_message(context, CHANNEL_USERNAME, question, author or {})
-        # Derive channel post URL and persist the actual channel/chat ID
-        chan = CHANNEL_USERNAME.lstrip("@")
-        post_url = f"https://t.me/{chan}/{msg.message_id}"
-        await db.update_question(
-            question_id,
-            channel_chat_id=msg.chat.id,
-            channel_message_id=msg.message_id,
-            channel_post_url=post_url,
-        )
-    except Exception as exc:
-        logger.error("Failed to post question to channel: %s", exc)
+    question = await db.create_question(user_id, topic, text, image_file_id)
+    log_event("question_submitted", user_id, {"topic": topic, "question_id": str(question.get("_id", ""))})
 
     # Cleanup
     user_state.pop(user_id, None)
@@ -211,12 +208,16 @@ async def _handle_reply_text(
     text: str,
     photo,
 ) -> None:
-    if not text:
+    cleaned_text = sanitize_text_content(text, max_length=3000)
+    if not cleaned_text:
         await update.message.reply_text("❗ Please write your reply text.")
+        return
+    if not REPLY_RATE_LIMITER.allow(str(user_id), "reply"):
+        await update.message.reply_text("⏳ You are sending replies too quickly. Please wait a moment.")
         return
 
     user_data.setdefault(user_id, {})
-    user_data[user_id]["reply_text"] = text
+    user_data[user_id]["reply_text"] = cleaned_text
     if photo:
         user_data[user_id]["image_file_id"] = photo.file_id
 
@@ -248,13 +249,14 @@ async def post_reply(
     data = user_data.get(user_id, {})
     question_id = data.get("question_id")
     parent_reply_id = data.get("parent_reply_id")
-    text = data.get("reply_text", "")
+    text = sanitize_text_content(data.get("reply_text", ""), max_length=3000)
     image_file_id = data.get("image_file_id")
 
     if not question_id or not text:
         return
 
     reply = await db.create_reply(question_id, user_id, text, parent_reply_id, image_file_id)
+    log_event("reply_submitted", user_id, {"question_id": str(question_id), "reply_id": str(reply.get("_id", ""))})
     question = await db.get_question(question_id)
     author = await db.get_user(user_id)
     reply_id = oid(reply)
