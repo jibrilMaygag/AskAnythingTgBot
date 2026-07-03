@@ -294,9 +294,8 @@ def kb_channel_question(question_id: str, reply_count: int) -> InlineKeyboardMar
     """Keyboard attached to channel-posted question."""
     answer_url = f"https://t.me/{BOT_USERNAME}?start=answer_{question_id}"
     view_url = f"https://t.me/{BOT_USERNAME}?start=show_{question_id}"
-    row = [InlineKeyboardButton("✍️ Answer", url=answer_url)]
-    if reply_count > 0:
-        row.append(InlineKeyboardButton(f"💬 {reply_count} Answers", url=view_url))
+    row = [InlineKeyboardButton("Answer", url=answer_url)]
+    row.append(InlineKeyboardButton(f"Answers({reply_count})", url=view_url))
     return InlineKeyboardMarkup([row])
 
 
