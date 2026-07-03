@@ -2,10 +2,11 @@
 utils.py – Reusable helpers: rendering, keyboard builders, time formatting, send helpers.
 """
 
-import html
 import logging
-import time
+import re
+from collections import defaultdict, deque
 from datetime import datetime, timezone
+from time import time
 from typing import Optional
 
 from bson import ObjectId
@@ -22,70 +23,33 @@ logger = logging.getLogger(__name__)
 
 
 class SimpleRateLimiter:
-    """Simple in-memory rate limiter keyed by user and action."""
-
     def __init__(self, limit: int, window_seconds: int) -> None:
         self.limit = limit
-        self.window_seconds = window_seconds
-        self._entries: dict[tuple[str, str], list[float]] = {}
+        self.window = window_seconds
+        self._buckets: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
-    def allow(self, key: str, scope: str = "default") -> bool:
-        now = time.monotonic()
-        entry_key = (str(key), str(scope))
-        timestamps = self._entries.get(entry_key, [])
-        cutoff = now - self.window_seconds
-        timestamps = [ts for ts in timestamps if ts > cutoff]
-        if len(timestamps) >= self.limit:
-            self._entries[entry_key] = timestamps
+    def allow(self, user_key: str, action: str) -> bool:
+        now = time()
+        key = (user_key, action)
+        bucket = self._buckets[key]
+        while bucket and now - bucket[0] > self.window:
+            bucket.popleft()
+        if len(bucket) >= self.limit:
             return False
-        timestamps.append(now)
-        self._entries[entry_key] = timestamps
+        bucket.append(now)
         return True
 
 
-def sanitize_text_content(text: Optional[str], max_length: Optional[int] = None) -> str:
-    """Escape HTML and truncate text for Telegram-safe display."""
+def sanitize_text_content(text: str, max_length: int = 4000) -> str:
     if text is None:
-        text = ""
-    cleaned = html.escape(text.strip())
-    if max_length is not None:
-        cleaned = cleaned[:max_length]
-    return cleaned
+        return ""
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text[:max_length]
+    return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
-def validate_topic(topic: Optional[str]) -> bool:
-    """Return True when the topic is in the supported set."""
-    if not topic:
-        return False
-    normalized = topic.strip().lower()
-    allowed = {
-        "art", "beauty", "business", "education", "entertainment",
-        "family", "food", "health", "history", "language", "law",
-        "personal", "philosophy", "politics", "relationships",
-        "religion", "science", "sexual", "society", "sport",
-        "technology", "other", "general",
-    }
-    return normalized in allowed
-
-
-def normalize_content_rating(rating: Optional[str]) -> str:
-    """Normalize content-rating values to a known safe default."""
-    normalized = (rating or "").strip().lower()
-    return normalized if normalized in {"normal", "sensitive", "mature"} else "normal"
-
-
-def build_channel_question_text(question: dict, author: dict) -> str:
-    """Render a compact preview for channel/moderation messages."""
-    topic = (question.get("topic") or "general").lower()
-    reply_count = question.get("reply_count", 0)
-    if normalize_content_rating(question.get("content_rating")) == "sensitive":
-        return f"#{topic}\n\n[explicit content]\n\nAnswers ({reply_count})"
-
-    text = (question.get("text") or "").strip()
-    author_name = format_user_short(author or {})
-    if not text:
-        text = "[empty question]"
-    return f"#{topic}\n\n{text}\n\nBy: {author_name}\nAnswers ({reply_count})"
+def validate_topic(topic: str) -> bool:
+    return bool(re.fullmatch(r"[a-zA-Z]{2,20}", topic or ""))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -142,6 +106,31 @@ def format_user_short(user: dict) -> str:
 # CONTENT FORMATTING
 # ═════════════════════════════════════════════════════════════════════════════
 
+def normalize_content_rating(value: Optional[str]) -> str:
+    if value in {"sensitive"}:
+        return "sensitive"
+    return "normal"
+
+
+def build_channel_question_text(question: dict, author: dict) -> str:
+    topic = question.get("topic", "general").lower()
+    author_name = format_user_short(author or {})
+    rating = normalize_content_rating(question.get("content_rating"))
+    
+    if rating == "sensitive":
+        return (
+            f"#{topic}\n\n"
+            f"⚠️ <code>This question contains explicit content that may not be suitable for all our members. Click the Answers below if you still want to view it.\n\n</code>"
+            f"By: {author_name}\n\n"
+        )
+        
+    return (
+        f"#{topic}\n\n"
+        f"<b>{question['text']}</b>\n\n"
+        f"By: {author_name}\n\n"
+    )
+
+
 def format_question_text(question: dict, author: dict) -> str:
     topic = question.get("topic", "general").lower()
     author_name = format_user_short(author or {})
@@ -163,12 +152,15 @@ def format_reply_text(reply: dict, author: dict) -> str:
     )
 
 
-def format_profile_text(user: dict) -> str:
+async def format_profile_text(user: dict) -> str:
     name = format_user_short(user or {})
     gender = {"M": "👨 Male", "F": "👩 Female"}.get(user.get("gender"), "Not set")
     rep = user.get("reputation", 0)
-    questions = len(user.get("question_ids", []))
-    replies = len(user.get("reply_ids", []))
+    questions = 0
+    replies = 0
+    if user:
+        questions = await db.get_user_question_count(user.get("telegram_id", 0)) if hasattr(db, "get_user_question_count") else 0
+        replies = await db.get_user_reply_count(user.get("telegram_id", 0)) if hasattr(db, "get_user_reply_count") else 0
     joined = time_ago(user.get("created_at", datetime.now(timezone.utc)))
     return (
         f"👤 <b>Profile</b>\n\n"
@@ -271,11 +263,11 @@ def kb_reply(
     flag_label = "🚩 Flagged" if is_flagged else "🚩"
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(
-            f"👍{'✓' if user_vote == 'up' else ''} {up_count}",
+            f"✅{'✓' if user_vote == 'up' else ''} {up_count}",
             callback_data=f"vote_up:{reply_id}:{question_id}"
         ),
         InlineKeyboardButton(
-            f"👎{'✓' if user_vote == 'down' else ''} {dn_count}",
+            f"❌{'✓' if user_vote == 'down' else ''} {dn_count}",
             callback_data=f"vote_down:{reply_id}:{question_id}"
         ),
         InlineKeyboardButton(flag_label, callback_data=f"report_reply:{reply_id}"),
@@ -302,8 +294,9 @@ def kb_channel_question(question_id: str, reply_count: int) -> InlineKeyboardMar
     """Keyboard attached to channel-posted question."""
     answer_url = f"https://t.me/{BOT_USERNAME}?start=answer_{question_id}"
     view_url = f"https://t.me/{BOT_USERNAME}?start=show_{question_id}"
-    row = [InlineKeyboardButton("Answer", url=answer_url)]
-    row.append(InlineKeyboardButton(f"Answers ({reply_count})", url=view_url))
+    row = [InlineKeyboardButton("✍️ Answer", url=answer_url)]
+    if reply_count > 0:
+        row.append(InlineKeyboardButton(f"💬 {reply_count} Answers", url=view_url))
     return InlineKeyboardMarkup([row])
 
 
@@ -343,13 +336,11 @@ def kb_search_nav(query: str, page: int, has_next: bool) -> InlineKeyboardMarkup
 
 
 def kb_admin_report(report_id: str, target_type: str, target_id: str) -> InlineKeyboardMarkup:
-    short_target_type = "r" if target_type == "reply" else "q"
-    short_report_id = report_id[-8:]
-    short_target_id = target_id[-8:]
+    short_type = target_type[0].lower() if target_type else "r"
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🗑 Delete", callback_data=f"d:{short_target_type}:{short_target_id}:{short_report_id}"),
-        InlineKeyboardButton("🔇 Mute Author", callback_data=f"m:{short_target_id}:{short_report_id}"),
-        InlineKeyboardButton("✅ Dismiss", callback_data=f"x:{short_report_id}"),
+        InlineKeyboardButton("🗑 Delete", callback_data=f"ad:{short_type}:{report_id}"),
+        InlineKeyboardButton("🔇 Mute Author", callback_data=f"am:{report_id}"),
+        InlineKeyboardButton("✅ Dismiss", callback_data=f"di:{report_id}"),
     ]])
 
 
@@ -364,8 +355,8 @@ async def send_question_message(
     author: dict,
     is_channel_post: bool = False,
 ) -> int:
-    """Send a formatted question. Returns telegram message object."""
-    text = format_question_text(question, author)
+    """Send a formatted question. Returns telegram message_id."""
+    text = build_channel_question_text(question, author) if is_channel_post else format_question_text(question, author)
     question_id = oid(question)
     reply_count = question.get("reply_count", 0)
     keyboard = kb_channel_question(question_id, reply_count)
@@ -385,10 +376,7 @@ async def send_question_message(
             parse_mode="HTML",
             reply_markup=keyboard,
         )
-
-    if is_channel_post:
-        return msg
-    return msg.message_id
+    return msg
 
 
 async def send_reply_message(
