@@ -9,6 +9,7 @@ Currently handles:
 import logging
 from typing import Optional
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 import database as db
@@ -110,12 +111,25 @@ async def notify_question_approved(
         "topic": question.get("topic", "general"),
     }
     await db.create_notification(author_id, payload)
-    text = (
-        f"✅ <b>Your question was approved</b>\n\n"
-        f"It is now live in the community."
-    )
+
+    channel_post_url = question.get("channel_post_url")
+    if not channel_post_url and question.get("channel_chat_id") and question.get("channel_message_id"):
+        channel_post_url = f"https://t.me/{question['channel_chat_id']}/{question['channel_message_id']}"
+
+    keyboard = None
+    if channel_post_url:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Show me", url=channel_post_url)]
+        ])
+
+    text = "<b>Your question was approved.</b>"
     try:
-        await context.bot.send_message(chat_id=author_id, text=text, parse_mode="HTML")
+        await context.bot.send_message(
+            chat_id=author_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
     except Exception as exc:
         logger.info("Could not deliver approval notification to %s: %s", author_id, exc)
 
@@ -135,7 +149,7 @@ async def notify_question_rejected(
         "reason": reason,
     }
     await db.create_notification(author_id, payload)
-    text = "❌ <b>Your question was rejected</b>"
+    text = "<b>Your question was rejected.</b>"
     if reason:
         text += f"\nReason: {reason}"
     try:

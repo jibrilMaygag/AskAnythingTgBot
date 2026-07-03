@@ -247,6 +247,7 @@ async def callback_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         channel_message_id=msg.message_id,
                         channel_post_url=post_url,
                     )
+                    question = await db.get_question(question_id)
                     await notifications.notify_question_approved(context, question, author or {})
                     await query.edit_message_text("✅ Question approved and published.")
                 except Exception as exc:
@@ -269,6 +270,7 @@ async def callback_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         channel_message_id=msg.message_id,
                         channel_post_url=post_url,
                     )
+                    question = await db.get_question(question_id)
                     await notifications.notify_question_approved(context, question, author or {})
                     await query.edit_message_text("✅ Sensitive question approved and published.")
                 except Exception as exc:
