@@ -112,7 +112,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ── Reply ───────────────────────────────────────────────────────────────
     if data == "confirm_reply":
         from handlers.message import post_reply
-        await query.edit_message_text("⏳ Posting your reply…")
+        await query.edit_message_text("⏳ Posting your Answer")
         await post_reply(context, chat_id, user_id)
         await context.bot.send_message(
             chat_id=chat_id,

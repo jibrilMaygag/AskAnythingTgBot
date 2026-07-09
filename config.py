@@ -34,5 +34,5 @@ TRENDING_PER_PAGE: int = 5
 # ── Reputation weights ────────────────────────────────────────────────────────
 REP_UPVOTE_RECEIVED: int = 5
 REP_DOWNVOTE_RECEIVED: int = -2
-REP_ANSWER_POSTED: int = 2
+REP_ANSWER_POSTED: int = 1
 REP_QUESTION_POSTED: int = 1
