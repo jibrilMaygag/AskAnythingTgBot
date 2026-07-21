@@ -37,7 +37,13 @@ _client: Optional[AsyncIOMotorClient] = None
 def _db():
     global _client
     if _client is None:
-        _client = AsyncIOMotorClient(MONGO_URI)
+        kwargs = {}
+        try:
+            import certifi
+            kwargs["tlsCAFile"] = certifi.where()
+        except ImportError:
+            pass
+        _client = AsyncIOMotorClient(MONGO_URI, **kwargs)
     return _client[DB_NAME]
 
 
