@@ -103,11 +103,6 @@ def main() -> None:
     )
 
     logger.info("Bot is starting…")
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-
     app.run_polling(poll_interval=2, drop_pending_updates=True)
 
 
