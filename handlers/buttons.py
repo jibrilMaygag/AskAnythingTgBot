@@ -111,12 +111,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ── Reply ───────────────────────────────────────────────────────────────
     if data == "confirm_reply":
+        data_dict = user_data.get(user_id, {})
+        question_id = data_dict.get("question_id")
+        question = await db.get_question(question_id) if question_id else None
+        if not question:
+            await query.answer("❌ This question is no longer available.", show_alert=True)
+            user_state.pop(user_id, None)
+            user_data.pop(user_id, None)
+            return
+        is_reply = bool(data_dict.get("parent_reply_id"))
+        target_name = "Reply" if is_reply else "Answer"
         from handlers.message import post_reply
-        await query.edit_message_text("⏳ Posting your Answer")
+        await query.edit_message_text(f"⏳ Posting your {target_name}")
         await post_reply(context, chat_id, user_id)
         await context.bot.send_message(
             chat_id=chat_id,
-            text="✅ Reply posted!",
+            text=f"✅ {target_name} posted!",
             reply_markup=kb_main_menu(),
         )
         return
@@ -125,6 +135,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parts = data.split(":")
         parent_reply_id = parts[1]
         question_id = parts[2]
+        question = await db.get_question(question_id) if question_id else None
+        if not question:
+            await query.answer("❌ This question is no longer available.", show_alert=True)
+            return
         user_state[user_id] = WRITING_REPLY
         user_data[user_id] = {
             "question_id": question_id,
@@ -176,11 +190,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parts = data.split(":")
         reply_id = parts[1]
         question_id = parts[2]
-        changed, prev = await db.cast_vote(reply_id, "reply", user_id, direction)
-        if not changed:
-            await query.answer("Already voted!", show_alert=False)
+        question = await db.get_question(question_id) if question_id else None
+        if not question:
+            await query.answer("❌ This question is no longer available.", show_alert=True)
             return
-        label = "👍 Liked!" if direction == "up" else "👎 Disliked!"
+        changed, new_dir = await db.cast_vote(reply_id, "reply", user_id, direction)
+        if new_dir is None:
+            label = "Vote removed!"
+        elif new_dir == "up":
+            label = "👍 Liked!"
+        else:
+            label = "👎 Disliked!"
         await query.answer(label, show_alert=False)
         await update_reply_vote_keyboard(
             context, chat_id, message_id, reply_id, question_id, viewer_id=user_id
@@ -190,14 +210,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ── Report ──────────────────────────────────────────────────────────────
     if data.startswith("report_reply:"):
         reply_id = data[13:]
+        reply = await db.get_reply(reply_id)
+        question_id = str(reply["question_id"]) if reply else None
+        question = await db.get_question(question_id) if question_id else None
+        if not question:
+            await query.answer("❌ This question is no longer available.", show_alert=True)
+            return
+
         added = await db.add_report(reply_id, "reply", user_id)
         if added:
             await query.answer("🚩 Reply reported. Moderators will review it.", show_alert=True)
         else:
             await query.answer("Already reported.", show_alert=False)
 
-        reply = await db.get_reply(reply_id)
-        question_id = str(reply["question_id"]) if reply else ""
         await update_reply_vote_keyboard(
             context, chat_id, message_id, reply_id, question_id,
             viewer_id=user_id,
@@ -209,6 +234,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parts = data.split(":")
         question_id = parts[1]
         offset = int(parts[2])
+        question = await db.get_question(question_id) if question_id else None
+        if not question:
+            await query.answer("❌ This question is no longer available.", show_alert=True)
+            return
         sent, total = await send_replies_batch(
             context, chat_id, question_id,
             offset=offset, limit=REPLIES_PER_PAGE, viewer_id=user_id,
@@ -231,6 +260,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parts = data.split(":")
         question_id = parts[1]
         offset = int(parts[2])
+        question = await db.get_question(question_id) if question_id else None
+        if not question:
+            await query.answer("❌ This question is no longer available.", show_alert=True)
+            return
         # Fetch total first, then request everything remaining
         _, total = await db.get_replies_for_question(question_id, offset=0, limit=1)
         sent, total = await send_replies_batch(

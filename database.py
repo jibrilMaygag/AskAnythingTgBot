@@ -447,25 +447,33 @@ async def cast_vote(
     direction: str,         # "up" | "down"
 ) -> tuple[bool, Optional[str]]:
     """
-    Cast or change a vote.
-    Returns (changed: bool, previous_direction: str | None).
+    Cast, change, or remove a vote (toggle behavior).
+    Returns (changed: bool, current_direction: str | None).
+    - If vote was removed, returns (True, None).
+    - If vote was added or changed, returns (True, new_direction).
     Side-effects: adjusts vote counts on target and reputation on author.
     """
     if isinstance(target_id, str):
-        target_id = ObjectId(target_id)
+        try:
+            target_id = ObjectId(target_id)
+        except Exception:
+            return False, None
 
     existing = await _db().votes.find_one({"target_id": target_id, "user_id": user_id})
     prev = existing["direction"] if existing else None
 
     if prev == direction:
-        return False, prev   # Same vote – no change
-
-    # Upsert vote record
-    await _db().votes.update_one(
-        {"target_id": target_id, "user_id": user_id},
-        {"$set": {"direction": direction, "target_type": target_type, "voted_at": now_utc()}},
-        upsert=True,
-    )
+        # Toggle OFF: remove vote
+        new_dir = None
+        await _db().votes.delete_one({"target_id": target_id, "user_id": user_id})
+    else:
+        # Cast NEW vote or CHANGE direction
+        new_dir = direction
+        await _db().votes.update_one(
+            {"target_id": target_id, "user_id": user_id},
+            {"$set": {"direction": direction, "target_type": target_type, "voted_at": now_utc()}},
+            upsert=True,
+        )
 
     # Adjust counts on the target collection
     collection = _db().replies if target_type == "reply" else _db().questions
@@ -474,32 +482,40 @@ async def cast_vote(
         inc["upvotes"] = -1
     elif prev == "down":
         inc["downvotes"] = -1
-    if direction == "up":
+
+    if new_dir == "up":
         inc["upvotes"] = inc.get("upvotes", 0) + 1
-    else:
+    elif new_dir == "down":
         inc["downvotes"] = inc.get("downvotes", 0) + 1
 
-    target_doc = await collection.find_one_and_update(
-        {"_id": target_id}, {"$inc": inc}, return_document=True
-    )
+    if inc:
+        target_doc = await collection.find_one_and_update(
+            {"_id": target_id}, {"$inc": inc}, return_document=True
+        )
+    else:
+        target_doc = await collection.find_one({"_id": target_id})
 
     # Adjust author reputation
     if target_doc:
         author_id = target_doc.get("author_id")
         if author_id and author_id != user_id:
-            rep_delta = 0
-            if direction == "up" and prev != "up":
-                rep_delta += REP_UPVOTE_RECEIVED
-            if direction == "down" and prev != "down":
-                rep_delta += REP_DOWNVOTE_RECEIVED
-            if prev == "up" and direction != "up":
-                rep_delta -= REP_UPVOTE_RECEIVED
-            if prev == "down" and direction != "down":
-                rep_delta -= REP_DOWNVOTE_RECEIVED
-            if rep_delta:
+            old_rep = 0
+            if prev == "up":
+                old_rep = REP_UPVOTE_RECEIVED
+            elif prev == "down":
+                old_rep = REP_DOWNVOTE_RECEIVED
+
+            new_rep = 0
+            if new_dir == "up":
+                new_rep = REP_UPVOTE_RECEIVED
+            elif new_dir == "down":
+                new_rep = REP_DOWNVOTE_RECEIVED
+
+            rep_delta = new_rep - old_rep
+            if rep_delta != 0:
                 await adjust_reputation(author_id, rep_delta)
 
-    return True, prev
+    return True, new_dir
 
 
 # ═════════════════════════════════════════════════════════════════════════════

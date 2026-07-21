@@ -52,7 +52,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             question_id = payload[7:]
             question = await db.get_question(question_id)
             if not question:
-                await update.message.reply_text("❌ Question not found.")
+                await update.message.reply_text("❌ This question is no longer available.")
                 return
             # Show the question first, then prompt the user to write their reply
             author = await db.get_user(question["author_id"])
@@ -92,7 +92,7 @@ async def _show_question(
 ) -> None:
     question = await db.get_question(question_id)
     if not question:
-        await update.message.reply_text("❌ Question not found.")
+        await update.message.reply_text("❌ This question is no longer available.")
         return
 
     author = await db.get_user(question["author_id"])

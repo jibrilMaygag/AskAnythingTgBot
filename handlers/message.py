@@ -208,12 +208,23 @@ async def _handle_reply_text(
     text: str,
     photo,
 ) -> None:
+    question_id = user_data.get(user_id, {}).get("question_id")
+    question = await db.get_question(question_id) if question_id else None
+    if not question:
+        await update.message.reply_text("❌ This question is no longer available.")
+        user_state.pop(user_id, None)
+        user_data.pop(user_id, None)
+        return
+
+    is_reply = bool(user_data.get(user_id, {}).get("parent_reply_id"))
+    item_name = "reply" if is_reply else "answer"
+
     cleaned_text = sanitize_text_content(text, max_length=3000)
     if not cleaned_text:
-        await update.message.reply_text("❗ Please write your reply text.")
+        await update.message.reply_text(f"❗ Please write your {item_name} text.")
         return
     if not REPLY_RATE_LIMITER.allow(str(user_id), "reply"):
-        await update.message.reply_text("⏳ You are sending replies too quickly. Please wait a moment.")
+        await update.message.reply_text("⏳ You are sending messages too quickly. Please wait a moment.")
         return
 
     user_data.setdefault(user_id, {})
@@ -231,12 +242,14 @@ async def _send_reply_preview(
 ) -> None:
     data = user_data.get(user_id, {})
     text = data.get("reply_text", "")
+    is_reply = bool(data.get("parent_reply_id"))
+    heading = "reply" if is_reply else "answer"
 
-    preview = f"<b>Preview your reply:</b>\n\n{text}"
+    preview = f"<b>Preview your {heading}:</b>\n\n{text}"
     await update.message.reply_text(
         preview,
         parse_mode="HTML",
-        reply_markup=kb_confirm_reply(),
+        reply_markup=kb_confirm_reply(is_reply=is_reply),
     )
 
 
@@ -255,9 +268,15 @@ async def post_reply(
     if not question_id or not text:
         return
 
+    question = await db.get_question(question_id)
+    if not question:
+        await context.bot.send_message(chat_id=chat_id, text="❌ This question is no longer available.")
+        user_state.pop(user_id, None)
+        user_data.pop(user_id, None)
+        return
+
     reply = await db.create_reply(question_id, user_id, text, parent_reply_id, image_file_id)
     log_event("reply_submitted", user_id, {"question_id": str(question_id), "reply_id": str(reply.get("_id", ""))})
-    question = await db.get_question(question_id)
     author = await db.get_user(user_id)
     reply_id = oid(reply)
 

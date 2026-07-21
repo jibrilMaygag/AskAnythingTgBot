@@ -227,9 +227,10 @@ def kb_confirm_question(has_image: bool = False) -> InlineKeyboardMarkup:
     ]])
 
 
-def kb_confirm_reply(has_image: bool = False) -> InlineKeyboardMarkup:
+def kb_confirm_reply(is_reply: bool = False) -> InlineKeyboardMarkup:
+    btn_label = "✅ Post Reply" if is_reply else "✅ Post Answer"
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Post Reply", callback_data="confirm_reply"),
+        InlineKeyboardButton(btn_label, callback_data="confirm_reply"),
         InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
     ]])
 
@@ -430,6 +431,9 @@ async def send_replies_batch(
     exclude_reply_id: str = None,
 ) -> tuple[int, int]:
     """Send a page of replies. Returns (sent_count, total)."""
+    question = await db.get_question(question_id) if question_id else None
+    if not question:
+        return 0, 0
     replies, total = await db.get_replies_for_question(
         question_id,
         offset=offset,

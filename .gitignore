@@ -3,3 +3,5 @@ config.example.py
 .env
 __pycache__/
 *.pyc
+*.log
+.pytest_cache/

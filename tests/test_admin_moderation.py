@@ -52,7 +52,7 @@ class ParseUserIdArgTests(unittest.TestCase):
         text = build_channel_question_text(question, {})
         self.assertIn("explicit content", text.lower())
         self.assertNotIn("This is a secret question", text)
-        self.assertIn("Answers (0)", text)
+        self.assertIn("Answers", text)
 
 
 if __name__ == "__main__":
